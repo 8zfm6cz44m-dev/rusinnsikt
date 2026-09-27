@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Rusinnsikt: brukes av Android 11 og eldre (API 30 og lavere) via
+   android:fullBackupContent. Android 12+ bruker data_extraction_rules.xml.
+   android:allowBackup="false" i manifestet slår backup av; disse reglene
+   ekskluderer i tillegg alt eksplisitt, i tilfelle attributtet noen gang
+   endres ved et uhell.
+-->
+<full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>

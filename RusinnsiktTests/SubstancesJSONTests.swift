@@ -1,0 +1,132 @@
+import XCTest
+@testable import Rusinnsikt
+
+/// Guards against a broken or malformed Substances.json ever reaching a
+/// build undetected. DataStore.swift calls fatalError() if this file fails
+/// to decode, which would crash the app at launch for every user — these
+/// tests catch that at build/test time instead.
+///
+/// Requires this test target's "Host Application" to be set to Rusinnsikt (the
+/// default Xcode offers when creating a Unit Testing Bundle target), so
+/// that Bundle.main resolves to the app bundle containing Substances.json —
+/// exactly like DataStore.swift's own loading code.
+final class SubstancesJSONTests: XCTestCase {
+
+    private func loadDatabase() throws -> SubstanceDatabase {
+        let url = try XCTUnwrap(
+            Bundle.main.url(forResource: "Substances", withExtension: "json"),
+            "Substances.json not found in the app bundle"
+        )
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(SubstanceDatabase.self, from: data)
+    }
+
+    func testSubstancesJSON_decodesWithoutError() throws {
+        XCTAssertNoThrow(try loadDatabase())
+    }
+
+    func testSubstancesJSON_isNotEmpty() throws {
+        let database = try loadDatabase()
+        XCTAssertFalse(database.substances.isEmpty)
+    }
+
+    func testSubstancesJSON_allIDsAreUnique() throws {
+        let database = try loadDatabase()
+        let ids = database.substances.map(\.id)
+        XCTAssertEqual(Set(ids).count, ids.count, "Duplicate substance id found — this can cause subtle SwiftUI list/navigation bugs")
+    }
+
+    func testSubstancesJSON_noSubstanceHasEmptyCoreFields() throws {
+        let database = try loadDatabase()
+        for substance in database.substances {
+            XCTAssertFalse(substance.name.isEmpty, "Substance \(substance.id) has an empty name")
+            XCTAssertFalse(substance.shortDescription.isEmpty, "Substance \(substance.id) has an empty shortDescription")
+            XCTAssertFalse(substance.overdoseSigns.isEmpty, "Substance \(substance.id) has no overdoseSigns")
+            XCTAssertFalse(substance.emergencyAction.isEmpty, "Substance \(substance.id) has an empty emergencyAction")
+        }
+    }
+
+    func testEmergencyNumbers_areAllPresent() throws {
+        let database = try loadDatabase()
+        XCTAssertEqual(database.emergencyNumbers.all.count, 4)
+        XCTAssertEqual(database.emergencyNumbers.ambulance.number, "113")
+        XCTAssertEqual(database.emergencyNumbers.ambulance.telURL, URL(string: "tel:113"))
+        XCTAssertEqual(database.emergencyNumbers.poison.telURL, URL(string: "tel:22591300"))
+        for number in database.emergencyNumbers.all {
+            XCTAssertFalse(number.number.isEmpty, "\(number.label) has no phone number")
+            XCTAssertNotNil(number.telURL, "\(number.label) must produce a tel: URL")
+        }
+    }
+
+    func testSubstanceGroup_poppersIsNotNikotin() throws {
+        let database = try loadDatabase()
+        let poppers = try XCTUnwrap(database.substances.first { $0.id == "poppers" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(poppers), .annet)
+        let snus = try XCTUnwrap(database.substances.first { $0.id == "snus" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(snus), .nikotin)
+        let vape = try XCTUnwrap(database.substances.first { $0.id == "e-sigaretter" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(vape), .nikotin)
+        let cannabis = try XCTUnwrap(database.substances.first { $0.id == "cannabis" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(cannabis), .cannabinoider)
+    }
+
+    func testSubstanceGroup_kratomXylazinNps() throws {
+        let database = try loadDatabase()
+        // Kratom's category string is "Plantebasert stoff (opioid- og
+        // stimulerende virkning)" — contains "opioid", so it lands under
+        // Opioider even though it's plant-based, per forSubstance's
+        // keyword-priority order.
+        let kratom = try XCTUnwrap(database.substances.first { $0.id == "kratom" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(kratom), .opioider)
+        // Xylazine and NPS don't match any of the specific keyword buckets
+        // and fall through to Andre stoffer.
+        let xylazin = try XCTUnwrap(database.substances.first { $0.id == "xylazin" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(xylazin), .annet)
+        let nps = try XCTUnwrap(database.substances.first { $0.id == "nps" })
+        XCTAssertEqual(SubstanceGroup.forSubstance(nps), .annet)
+    }
+
+    func testDataStore_initializesWithoutCrashing() {
+        // DataStore's init() force-loads and decodes Substances.json,
+        // fatalError()-ing on failure. Constructing it here means a broken
+        // JSON file fails this test instead of crashing the shipped app.
+        let store = DataStore()
+        XCTAssertFalse(store.substances.isEmpty)
+    }
+
+    // MARK: - Risikoreduksjon
+
+    func testGeneralRiskReductionIsPresent() throws {
+        let database = try loadDatabase()
+        let rr = database.generalRiskReduction
+        XCTAssertFalse(rr.title.isEmpty)
+        XCTAssertFalse(rr.intro.isEmpty)
+        XCTAssertGreaterThanOrEqual(rr.rules.count, 5)
+        XCTAssertFalse(rr.sourceNote.isEmpty)
+    }
+
+    func testHighRiskSubstancesHaveRiskReduction() throws {
+        let database = try loadDatabase()
+        for id in ["ghb", "mdma", "opioider", "nye-opioider", "benzodiazepiner", "alkohol", "kokain", "ketamin"] {
+            let s = try XCTUnwrap(database.substances.first { $0.id == id }, "\(id) missing")
+            XCTAssertFalse((s.riskReduction ?? []).isEmpty, "\(id) should have riskReduction")
+        }
+    }
+
+    /// Apple-retningslinje 1.4.2/1.4.3 og CLAUDE.md: rådene skal aldri
+    /// inneholde doser eller mengder. En tallverdi etterfulgt av en
+    /// masse-/volumenhet er en dose — og skal ikke finnes i teksten.
+    func testRiskReductionNeverContainsDoses() throws {
+        let database = try loadDatabase()
+        let dosePattern = try NSRegularExpression(
+            pattern: #"\d+([.,]\d+)?\s?(mg|ml|g|gram|µg|mikrogram|milligram|milliliter|dl|cl)\b"#,
+            options: [.caseInsensitive]
+        )
+        var texts = database.generalRiskReduction.rules
+        for s in database.substances { texts += s.riskReduction ?? [] }
+        for text in texts {
+            let range = NSRange(text.startIndex..., in: text)
+            XCTAssertNil(dosePattern.firstMatch(in: text, range: range), "Dose i risikoreduksjonstekst: \(text)")
+        }
+    }
+}
